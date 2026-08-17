@@ -69,9 +69,9 @@ pkgs.mkShell {
   OBJCOPY = "${llvm.llvm}/bin/llvm-objcopy";
 
   shellHook = ''
-    export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
-    export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-    export PATH="$CARGO_HOME/bin:$PATH"
+    export CARGO_HOME="''${CARGO_HOME:-''$HOME/.cargo}"
+    export RUSTUP_HOME="''${RUSTUP_HOME:-''$HOME/.rustup}"
+    export PATH="''$CARGO_HOME/bin:''$PATH"
 
     if ! command -v cargo >/dev/null 2>&1 || ! rustup show active-toolchain >/dev/null 2>&1; then
       echo "Installing Rust nightly toolchain via rustup..."
