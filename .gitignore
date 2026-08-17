@@ -11,4 +11,5 @@
 !LICENSE
 !README.md
 !vship.mk
+!shell.nix
 !.gitignore
