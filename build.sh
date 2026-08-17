@@ -332,10 +332,11 @@ build_dav1d() {
         : > "${logfile}"
 
         cd "${BUILD_DIR}/dav1d"
-        # meson's compiler probes must produce runnable executables; the project
-        # CFLAGS (-flto=thin, -fno-pie/-fno-pic) break that, so build dav1d with
-        # its own tuned flags instead.
-        unset CFLAGS CXXFLAGS LDFLAGS
+        # build dav1d with dav1d's own tuned flags; force PIE so the meson
+        # sanity probe stays runnable on glibc >= 2.39 (non-PIE exes break with
+        # an IFUNC circular dependency in libgcc_s).
+        export CFLAGS="-fPIE"
+        export LDFLAGS="-pie"
         meson setup build --default-library=static \
                 --buildtype=release \
                 -Denable_tools=false \
