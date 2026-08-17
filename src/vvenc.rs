@@ -1,3 +1,8 @@
+// Field names mirror the pinned libvvenc C headers exactly (m_SourceWidth,
+// m_picReordering, ...) so the repr(C) layout matches; silence the snake_case
+// lint for that hand-written FFI mirror.
+#![allow(non_snake_case)]
+
 use alloc::{
     ffi::{CString, NulError},
     format,
