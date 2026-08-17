@@ -684,7 +684,10 @@ pub fn set_vvenc_base(cfg: &mut VvencConfig, inf: &VidInf, w: u32, h: u32) {
     cfg.m_internalBitDepth = [10, 10];
     cfg.m_outputBitDepth = [10, 10];
     cfg.m_MSBExtendedBitDepth = [10, 10];
-    cfg.m_numThreads = 1;
+    // 0 = auto: libvvenc picks the thread count by resolution, matching
+    // vvencFFapp's default `--Threads 0`. Forcing 1 here makes xav's vvenc
+    // ~8x slower than the standalone app.
+    cfg.m_numThreads = 0;
     cfg.m_verbosity = VVENC_MSG_SILENT;
     cfg.m_profile = VVENC_PROFILE_MAIN_10;
     cfg.m_levelTier = VVENC_TIER_MAIN;
