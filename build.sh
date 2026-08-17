@@ -300,7 +300,7 @@ clone_phase() {
         clone_async "${BUILD_DIR}/opus" "https://github.com/xiph/opus.git"
         clone_async "${BUILD_DIR}/SVT-AV1" "${svt_fork_url}"
         clone_async "${BUILD_DIR}/dav1d" "https://github.com/videolan/dav1d.git"
-        clone_async "${BUILD_DIR}/FFmpeg" "https://github.com/FFmpeg/FFmpeg"
+        clone_async "${BUILD_DIR}/FFmpeg" "https://github.com/FFmpeg/FFmpeg" "--depth 1"
 
         [[ "${HW}" == cuda ]] && clone_async "${BUILD_DIR}/nv-codec-headers" "https://github.com/FFmpeg/nv-codec-headers" "--depth 1" || {
                 mkdir -p "${BUILD_DIR}/vulkan"
