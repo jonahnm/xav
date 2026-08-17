@@ -45,7 +45,7 @@ pkgs.mkShell {
     meson
     pkg-config
     pkgconf
-    make
+    gnumake
     autoconf
     automake
     libtool
