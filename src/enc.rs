@@ -33,8 +33,8 @@ use crate::path::PathBuf;
 #[cfg(feature = "vvenc")]
 use crate::vvenc::{
     VVENC_CFG_SIZE, VVENC_OK, VvencAccessUnit, VvencConfig, VvencEncoder, VvencYUVBuffer,
-    VvencYUVPlane, cfg_default, drop_au, encode, encode_drain, new_au, open, set_vvenc_base,
-    vvenc_encoder_close, vvenc_split,
+    VvencYUVPlane, cfg_default, drop_au, encode, encode_drain, new_au, new_enc, open,
+    set_vvenc_base, vvenc_encoder_close, vvenc_split,
 };
 use crate::{
     Args,
@@ -3064,8 +3064,7 @@ macro_rules! make_enc_vvenc {
             conv_buf: &mut [u8],
             track: &EncTrack,
         ) -> u64 {
-            let mut ec = MaybeUninit::<VvencEncoder>::uninit();
-            let ecp = ec.as_mut_ptr();
+            let ecp = new_enc();
             let (tracker, sz) = $send(ecp, out, yuv, cfg, ctx, conv_buf, track);
             *yuv = Vec::new();
             finish_vvenc(ecp, &tracker);
@@ -3086,8 +3085,7 @@ macro_rules! make_enc_vvenc_tq {
             conv_buf: &mut [u8],
             track: &EncTrack,
         ) -> u64 {
-            let mut ec = MaybeUninit::<VvencEncoder>::uninit();
-            let ecp = ec.as_mut_ptr();
+            let ecp = new_enc();
             let (tracker, sz) = $send(ecp, out, yuv.as_slice(), cfg, ctx, conv_buf, track);
             finish_vvenc(ecp, &tracker);
             sz
@@ -3141,8 +3139,7 @@ fn enc_vvenc_direct(
         track_frames,
         crf_score,
     } = track;
-    let mut ec = MaybeUninit::<VvencEncoder>::uninit();
-    let ecp = ec.as_mut_ptr();
+    let ecp = new_enc();
     init_vvenc(cfg, ecp);
 
     let w = cfg.width as usize;

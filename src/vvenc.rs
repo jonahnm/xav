@@ -744,6 +744,15 @@ pub fn set_vvenc_base(cfg: &mut VvencConfig, inf: &VidInf, w: u32, h: u32) {
     }
 }
 
+pub fn new_enc() -> *mut VvencEncoder {
+    let enc = unsafe { vvenc_encoder_create() };
+    if enc.is_null() {
+        cold_path();
+        fatal("vvenc: vvenc_encoder_create failed");
+    }
+    enc
+}
+
 pub fn open(enc: *mut VvencEncoder, cfg: &mut VvencConfig) {
     let ret = unsafe { vvenc_encoder_open(enc, cfg) };
     if ret != VVENC_OK {
