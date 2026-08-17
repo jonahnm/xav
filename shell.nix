@@ -18,7 +18,11 @@
 { pkgs ? import <nixpkgs> { } }:
 
 let
-  llvm = pkgs.llvmPackages_latest;
+  # use the stable LLVM toolchain: bleeding-edge clang (llvmPackages_latest)
+  # dynamically-linked binaries break on glibc>=2.39 with an IFUNC circular
+  # dependency in libgcc_s ("IFUNC symbol 'memset' ... is defined in the
+  # executable and creates an unsatisfiable circular dependency").
+  llvm = pkgs.llvmPackages;
 in
 pkgs.mkShell {
   packages = with pkgs; [
