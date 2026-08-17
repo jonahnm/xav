@@ -25,6 +25,8 @@ use std::{env::args as env_args, panic::set_hook};
 
 #[cfg(all(feature = "vship", feature = "avm"))]
 use crate::encoder::Encoder::Avm;
+#[cfg(feature = "vvenc")]
+use crate::encoder::Encoder::Vvenc;
 #[cfg(unix)]
 use crate::process::{Command, Stdio};
 #[cfg(all(target_os = "linux", not(test)))]
@@ -110,6 +112,8 @@ mod uring;
 mod util;
 #[cfg(feature = "vship")]
 mod vship;
+#[cfg(feature = "vvenc")]
+mod vvenc;
 mod worker;
 mod y4m;
 
@@ -147,6 +151,8 @@ pub struct Args {
     pub worker: usize,
     pub sc_file: PathBuf,
     pub params: String,
+    #[cfg(feature = "vvenc")]
+    pub preset: Option<String>,
     pub au: Option<AuSpec>,
     pub inp: PathBuf,
     pub out: PathBuf,
@@ -191,6 +197,8 @@ const VW: usize = {
     let w = wmax(w, env!("XAV_V_DAV1D").len());
     #[cfg(feature = "avm")]
     let w = wmax(w, env!("XAV_V_AVM").len());
+    #[cfg(feature = "vvenc")]
+    let w = wmax(w, env!("XAV_V_VVENC").len());
     #[cfg(feature = "vship")]
     let w = wmax(w, env!("XAV_V_VSHIP").len());
     #[cfg(all(feature = "vship", not(feature = "cuda")))]
@@ -209,6 +217,8 @@ fn print_help() {
     println!("{C}-w {P}┃ {C}--worker     {W}Parallelism");
     println!("{C}-b {P}┃ {C}--buff       {W}Chunks to buffer");
     println!("{C}-p {P}┃ {C}--param      {W}Encoder params");
+    #[cfg(feature = "vvenc")]
+    println!("   {P}┃ {C}--preset     {W}VVENC preset: {G}faster{B}┃{G}fast{B}┃{G}medium{B}┃{G}slow{B}┃{G}slower{B}┃{G}medium_lowDecEnergy");
     println!("{C}-s {P}┃ {C}--sc         {W}SCD file");
     println!("   {P}┃ {C}--sc-only    {W}Exit after SCD");
     println!("   {P}┃ {C}--hwdec      {W}GPU decode");
@@ -231,6 +241,8 @@ fn print_help() {
     println!("{C}DAV1D:       {G}{:<VW$}  {B}{}{N}", env!("XAV_V_DAV1D"), env!("XAV_D_DAV1D"));
     #[cfg(feature = "avm")]
     println!("{C}AVM:         {G}{:<VW$}  {B}{}{N}", env!("XAV_V_AVM"), env!("XAV_D_AVM"));
+    #[cfg(feature = "vvenc")]
+    println!("{C}VVENC:       {G}{:<VW$}  {B}{}{N}", env!("XAV_V_VVENC"), env!("XAV_D_VVENC"));
     #[cfg(feature = "vship")]
     {
         println!("{C}VSHIP:       {G}{:<VW$}  {B}{}{N}", env!("XAV_V_VSHIP"), env!("XAV_D_VSHIP"));
@@ -377,6 +389,9 @@ fn parse_args_loop(args: &[String]) -> Result<Args, Xerr> {
     let (mut worker, mut chnk_buff, mut sc_only, mut hwdec) = (1usize, None, false, false);
     let (mut sc_file, mut inp, mut out) = (PathBuf::new(), PathBuf::new(), PathBuf::new());
     let (mut encoder, mut params) = (Encoder::default(), String::new());
+    #[cfg(feature = "vvenc")]
+    let (mut preset, mut au, mut ranges) = (None::<String>, None, None);
+    #[cfg(not(feature = "vvenc"))]
     let (mut au, mut ranges) = (None, None);
     #[cfg(feature = "vship")]
     let (mut tq, mut qp_range, mut cvvdp_conf, mut alt_param) = (
@@ -400,6 +415,8 @@ fn parse_args_loop(args: &[String]) -> Result<Args, Xerr> {
             "-w" | "--worker" => arg!(parse args, i, worker),
             "-s" | "--sc" => arg!(path args, i, sc_file),
             "-p" | "--param" => arg!(str args, i, params),
+            #[cfg(feature = "vvenc")]
+            "--preset" => arg!(opt args, i, preset),
             "-b" | "--buff" => arg!(opt_parse args, i, chnk_buff),
             "-r" | "--range" => {
                 if let Some(v) = next_arg(args, &mut i) {
@@ -450,6 +467,8 @@ fn parse_args_loop(args: &[String]) -> Result<Args, Xerr> {
         worker,
         sc_file,
         params,
+        #[cfg(feature = "vvenc")]
+        preset,
         au,
         inp,
         out,
@@ -520,6 +539,21 @@ fn get_args(args: &[String], allow_resume: bool) -> Result<Args, Xerr> {
         if let Some(ref pp) = result.alt_param {
             val(pp)?;
         }
+    }
+
+    #[cfg(feature = "vvenc")]
+    if let Some(ref p) = result.preset {
+        if result.encoder != Vvenc {
+            return Err("--preset is only supported by the vvenc encoder".into());
+        }
+        if !vvenc::val_preset(p) {
+            return Err(format!(
+                "Unknown vvenc preset: {p} (valid: {})",
+                vvenc::VVENC_PRESETS.join(", ")
+            )
+            .into());
+        }
+        result.params = format!("{} --preset {p}", result.params);
     }
 
     if result.hwdec && is_pipe() {

@@ -184,6 +184,22 @@ fn stamp_versions(home: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
         );
     }
 
+    #[cfg(feature = "vvenc")]
+    {
+        let vvenc = format!("{src}/vvenc");
+        let ver = field(
+            &format!("{vvenc}/CMakeLists.txt"),
+            "project( vvenc VERSION ",
+        );
+        let pgo =
+            if env::var("XAV_PGO").is_ok() || Path::new(&format!("{vvenc}/install/pgo")).exists() {
+                Some("+pgo")
+            } else {
+                None
+            };
+        stamp("VVENC", ver.map(|v| v + pgo.unwrap_or("")), &vvenc);
+    }
+
     #[cfg(feature = "vship")]
     {
         let vship = format!("{src}/Vship");
@@ -361,6 +377,16 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         println!("cargo:rustc-link-lib=static=avm_full");
     }
 
+    #[cfg(feature = "vvenc")]
+    {
+        let vvenc_dir = format!("{home}/.local/src/vvenc/install/lib");
+        if !Path::new(&format!("{vvenc_dir}/libvvenc.a")).exists() {
+            return Err(format!("{vvenc_dir}/libvvenc.a not found").into());
+        }
+        println!("cargo:rustc-link-search=native={vvenc_dir}");
+        println!("cargo:rustc-link-lib=static=vvenc");
+    }
+
     #[cfg(feature = "vship")]
     {
         let vship_dir = format!("{home}/.local/src/Vship");
@@ -384,7 +410,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
 
-    #[cfg(any(feature = "vship", feature = "avm"))]
+    #[cfg(any(feature = "vship", feature = "avm", feature = "vvenc"))]
     println!("cargo:rustc-link-arg=-l:libstdc++.a");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {

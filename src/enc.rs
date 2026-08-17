@@ -30,6 +30,12 @@ use crate::chan::{mpmc_close, mpmc_recv, mpmc_send, mpsc_recv, mpsc_send};
 use crate::fmath::FloatExt as _;
 #[cfg(not(target_os = "linux"))]
 use crate::path::PathBuf;
+#[cfg(feature = "vvenc")]
+use crate::vvenc::{
+    VVENC_CFG_SIZE, VVENC_OK, VvencAccessUnit, VvencConfig, VvencEncoder, VvencYUVBuffer,
+    VvencYUVPlane, cfg_default, drop_au, encode, encode_drain, new_au, open, set_vvenc_base,
+    vvenc_encoder_close, vvenc_split,
+};
 use crate::{
     Args,
     chan::{Semaphore, SeqRing, sem_release, spmc_close, spmc_recv, spmc_send},
@@ -366,6 +372,7 @@ fn watch_enc_stderr(prog: &Arc<ProgsTrack>, child: &mut Child, w: Watch, encoder
     );
 }
 
+#[cfg(not(feature = "vvenc"))]
 fn watch_enc_stdout(prog: &Arc<ProgsTrack>, child: &mut Child, w: Watch, encoder: Encoder) {
     prog.watch_enc(
         unsafe { child.stdout.take().unwrap_unchecked() },
@@ -382,13 +389,23 @@ const fn watch_enc_unreachable(_: &Arc<ProgsTrack>, _: &mut Child, _: Watch, _: 
 fn resolve_watch_enc(encoder: Encoder) -> WatchEncFn {
     match encoder {
         X265 | X264 => watch_enc_stderr,
+        #[cfg(not(feature = "vvenc"))]
         Vvenc => watch_enc_stdout,
+        #[cfg(feature = "vvenc")]
+        Vvenc => watch_enc_unreachable,
         SvtAv1 | Avm => watch_enc_unreachable,
     }
 }
 
 const fn is_lib_enc(encoder: Encoder) -> bool {
-    matches!(encoder, SvtAv1 | Avm)
+    #[cfg(feature = "vvenc")]
+    {
+        return matches!(encoder, SvtAv1 | Avm | Vvenc);
+    }
+    #[cfg(not(feature = "vvenc"))]
+    {
+        matches!(encoder, SvtAv1 | Avm)
+    }
 }
 
 #[cold]
@@ -520,6 +537,31 @@ fn resolve_avm_enc(strat: DecStrat, is_nv12: bool, inf: &VidInf, pipe: &Pipeline
     }
 }
 
+#[cfg(feature = "vvenc")]
+#[cold]
+#[inline(never)]
+fn resolve_vvenc_enc(strat: DecStrat, is_nv12: bool, inf: &VidInf, pipe: &Pipeline) -> LibEncFn {
+    if strat.is_raw() {
+        enc_vvenc_direct
+    } else if is_nv12 {
+        if nv12_exact(pipe) {
+            enc_vvenc_nv12
+        } else {
+            enc_vvenc_nv12_rem
+        }
+    } else if inf.is_10b {
+        if unpack_exact(pipe) {
+            enc_vvenc_unpack
+        } else {
+            enc_vvenc_unpack_rem
+        }
+    } else if pipe.frame_sz.is_multiple_of(SHIFT_CHUNK) {
+        enc_vvenc_conv
+    } else {
+        enc_vvenc_conv_rem
+    }
+}
+
 #[cold]
 fn resolve_lib_enc(
     encoder: Encoder,
@@ -531,6 +573,8 @@ fn resolve_lib_enc(
     match encoder {
         #[cfg(feature = "avm")]
         Avm => resolve_avm_enc(strat, is_nv12, inf, pipe),
+        #[cfg(feature = "vvenc")]
+        Vvenc => resolve_vvenc_enc(strat, is_nv12, inf, pipe),
         _ => resolve_svt_enc(strat, is_nv12, inf, pipe),
     }
 }
@@ -1600,7 +1644,20 @@ fn spawn_tq_encoders(
     let chnk_fn = resolve_chnk_fn(sc.encoder, false);
     let probe_fn = resolve_probe_fn(sc.encoder);
     let watch_enc = resolve_watch_enc(sc.encoder);
-    let svt_enc = resolve_svt_crf_enc(sc.inf, sc.pipe);
+    let lib_crf_enc = {
+        #[cfg(feature = "vvenc")]
+        {
+            if sc.encoder == Vvenc {
+                resolve_vvenc_crf_enc(sc.inf, sc.pipe)
+            } else {
+                resolve_svt_crf_enc(sc.inf, sc.pipe)
+            }
+        }
+        #[cfg(not(feature = "vvenc"))]
+        {
+            resolve_svt_crf_enc(sc.inf, sc.pipe)
+        }
+    };
     let tq_loop = resolve_tq_loop(
         !sc.zones.is_empty() && tmpls.is_some(),
         is_lib_enc(sc.encoder),
@@ -1619,7 +1676,7 @@ fn spawn_tq_encoders(
                 work_dir: &wd,
                 prog: &prog_clone,
                 encoder,
-                lib_enc: svt_enc,
+                lib_enc: lib_crf_enc,
                 watch_enc,
                 chnk_fn,
                 tmpl: None,
@@ -2111,7 +2168,17 @@ fn resolve_build_tmpl(encoder: Encoder) -> Option<BuildTmpl> {
         Avm => Some(build_avm_templates),
         #[cfg(not(feature = "avm"))]
         Avm => None,
-        Vvenc | X265 | X264 => None,
+        Vvenc => {
+            #[cfg(feature = "vvenc")]
+            {
+                Some(build_vvenc_templates)
+            }
+            #[cfg(not(feature = "vvenc"))]
+            {
+                None
+            }
+        }
+        X265 | X264 => None,
     }
 }
 
@@ -2779,6 +2846,349 @@ fn finish_avm(
 
     unsafe { avm_codec_destroy(ec) };
 
+    sz
+}
+
+#[cfg(feature = "vvenc")]
+#[cold]
+#[inline(never)]
+fn build_vvenc_templates(
+    inf: &VidInf,
+    params: &str,
+    zones: &[Box<str>],
+    width: u32,
+    height: u32,
+) -> Vec<Arc<[u8]>> {
+    let mut conf = cfg_default();
+    set_vvenc_base(&mut conf, inf, width, height);
+    vvenc_split(&mut conf, params);
+
+    let mut v = Vec::with_capacity(zones.len() + 1);
+    v.push(tmpl_vvenc(&conf));
+    for z in zones {
+        let mut zc = unsafe { (&raw const conf).cast::<VvencConfig>().read_unaligned() };
+        vvenc_split(&mut zc, z);
+        v.push(tmpl_vvenc(&zc));
+    }
+    v
+}
+
+#[cfg(feature = "vvenc")]
+fn tmpl_vvenc(conf: &VvencConfig) -> Arc<[u8]> {
+    Arc::from(unsafe { from_raw_parts((&raw const *conf).cast::<u8>(), VVENC_CFG_SIZE) }.to_vec())
+}
+
+#[cfg(feature = "vvenc")]
+fn init_vvenc(cfg: &EncConfig, ec: *mut VvencEncoder) {
+    let t = unsafe { cfg.template.unwrap_unchecked() };
+    let mut conf = unsafe { t.as_ptr().cast::<VvencConfig>().read_unaligned() };
+    conf.m_framesToBeEncoded = cfg.frames as i32;
+    if let Some(crf) = cfg.crf {
+        conf.m_QP = crf as i32;
+    }
+    open(ec, &mut conf);
+}
+
+#[cfg(feature = "vvenc")]
+fn drain_vvenc_au(
+    au: *mut VvencAccessUnit,
+    out: &mut dyn Write,
+    tracker: &Tracker,
+    done: &mut usize,
+) -> u64 {
+    let used = unsafe { (*au).payload_used_size };
+    if used <= 0 {
+        return 0;
+    }
+    _ = out.write_all(unsafe { from_raw_parts((*au).payload, used as usize) });
+    *done += 1;
+    tracker.set(*done);
+    used as u64
+}
+
+// vvenc runs a fixed hierarchy: feed every frame, then flush with a NULL
+// buffer until the encoder reports the last access unit emitted.
+#[cfg(feature = "vvenc")]
+macro_rules! make_send_vvenc {
+    ($name:ident, $conv:expr) => {
+        fn $name(
+            ec: *mut VvencEncoder,
+            out: &mut dyn Write,
+            yuv: &[u8],
+            cfg: &EncConfig,
+            ctx: &EncWorkerCtx,
+            conv_buf: &mut [u8],
+            track: &EncTrack,
+        ) -> (Tracker, u64) {
+            let &EncTrack {
+                worker_id,
+                track_frames,
+                crf_score,
+            } = track;
+            init_vvenc(cfg, ec);
+
+            let w = cfg.width as usize;
+            let h = cfg.height as usize;
+
+            let mut buf = vvenc_img(conv_buf.as_mut_ptr(), w, h);
+            let buf_ptr = &raw mut buf;
+            let au = new_au();
+            let tracker = Tracker::new(
+                ctx.prog,
+                worker_id,
+                cfg.chnk_idx,
+                cfg.frames,
+                track_frames,
+                crf_score,
+            );
+            let mut done = 0;
+            let mut sz = 0;
+            let (fw, fh) = (ctx.pipe.final_w, ctx.pipe.final_h);
+            let frame_sz = ctx.pipe.frame_sz;
+            let mut src = yuv.as_ptr();
+
+            for i in 0..cfg.frames {
+                ($conv)(unsafe { from_raw_parts(src, frame_sz) }, conv_buf, fw, fh);
+                src = unsafe { src.add(frame_sz) };
+
+                unsafe { (*buf_ptr).sequence_number = i as u64 };
+                let mut ef = false;
+                encode(ec, buf_ptr, au, &mut ef);
+
+                sz += drain_vvenc_au(au, out, &tracker, &mut done);
+            }
+
+            let mut flush = false;
+            while !flush {
+                encode_drain(ec, au, &mut flush);
+                sz += drain_vvenc_au(au, out, &tracker, &mut done);
+            }
+
+            drop_au(au);
+            (tracker, sz)
+        }
+    };
+}
+
+#[cfg(feature = "vvenc")]
+const fn vvenc_img(base: *mut u8, w: usize, h: usize) -> VvencYUVBuffer {
+    let y_sz = w * h * 2;
+    let uv_sz = (w / 2) * (h / 2) * 2;
+    VvencYUVBuffer {
+        planes: [
+            VvencYUVPlane {
+                ptr: base.cast(),
+                width: w as i32,
+                height: h as i32,
+                stride: w as i32,
+            },
+            VvencYUVPlane {
+                ptr: unsafe { base.add(y_sz) }.cast(),
+                width: (w / 2) as i32,
+                height: (h / 2) as i32,
+                stride: (w / 2) as i32,
+            },
+            VvencYUVPlane {
+                ptr: unsafe { base.add(y_sz + uv_sz) }.cast(),
+                width: (w / 2) as i32,
+                height: (h / 2) as i32,
+                stride: (w / 2) as i32,
+            },
+        ],
+        sequence_number: 0,
+        cts: 0,
+        cts_valid: false,
+    }
+}
+
+#[cfg(feature = "vvenc")]
+make_send_vvenc!(
+    send_vvenc_conv,
+    |f: &[u8], b: &mut [u8], _w: usize, _h: usize| {
+        conv_10b(f, b);
+    }
+);
+#[cfg(feature = "vvenc")]
+make_send_vvenc!(
+    send_vvenc_conv_rem,
+    |f: &[u8], b: &mut [u8], _w: usize, _h: usize| conv_10b_rem(f, b)
+);
+#[cfg(feature = "vvenc")]
+make_send_vvenc!(
+    send_vvenc_unpack,
+    |f: &[u8], b: &mut [u8], _w: usize, _h: usize| unpack_10b(f, b)
+);
+#[cfg(feature = "vvenc")]
+make_send_vvenc!(
+    send_vvenc_unpack_rem,
+    |f: &[u8], b: &mut [u8], w: usize, h: usize| unpack_10b_rem(f, b, w, h)
+);
+#[cfg(feature = "vvenc")]
+make_send_vvenc!(
+    send_vvenc_nv12,
+    |f: &[u8], b: &mut [u8], w: usize, h: usize| {
+        nv12_10b(f, b, w, h);
+    }
+);
+#[cfg(feature = "vvenc")]
+make_send_vvenc!(
+    send_vvenc_nv12_rem,
+    |f: &[u8], b: &mut [u8], w: usize, h: usize| nv12_10b_rem(f, b, w, h)
+);
+
+#[cfg(all(feature = "vvenc", feature = "vship"))]
+#[cold]
+#[inline(never)]
+fn resolve_vvenc_crf_enc(inf: &VidInf, pipe: &Pipeline) -> LibEncFn {
+    if inf.is_10b {
+        if unpack_exact(pipe) {
+            enc_vvenc_lib_unpack
+        } else {
+            enc_vvenc_lib_unpack_rem
+        }
+    } else if pipe.frame_sz.is_multiple_of(SHIFT_CHUNK) {
+        enc_vvenc_lib
+    } else {
+        enc_vvenc_lib_rem
+    }
+}
+
+#[cfg(feature = "vvenc")]
+macro_rules! make_enc_vvenc {
+    ($name:ident, $send:ident) => {
+        fn $name(
+            yuv: &mut Vec<u8>,
+            out: &mut dyn Write,
+            cfg: &EncConfig,
+            ctx: &EncWorkerCtx,
+            conv_buf: &mut [u8],
+            track: &EncTrack,
+        ) -> u64 {
+            let mut ec = MaybeUninit::<VvencEncoder>::uninit();
+            let ecp = ec.as_mut_ptr();
+            let (tracker, sz) = $send(ecp, out, yuv, cfg, ctx, conv_buf, track);
+            *yuv = Vec::new();
+            finish_vvenc(ecp, &tracker);
+            sz
+        }
+    };
+}
+
+#[cfg(feature = "vvenc")]
+#[cfg(feature = "vship")]
+macro_rules! make_enc_vvenc_tq {
+    ($name:ident, $send:ident) => {
+        fn $name(
+            yuv: &mut Vec<u8>,
+            out: &mut dyn Write,
+            cfg: &EncConfig,
+            ctx: &EncWorkerCtx,
+            conv_buf: &mut [u8],
+            track: &EncTrack,
+        ) -> u64 {
+            let mut ec = MaybeUninit::<VvencEncoder>::uninit();
+            let ecp = ec.as_mut_ptr();
+            let (tracker, sz) = $send(ecp, out, yuv.as_slice(), cfg, ctx, conv_buf, track);
+            finish_vvenc(ecp, &tracker);
+            sz
+        }
+    };
+}
+
+#[cfg(feature = "vvenc")]
+fn finish_vvenc(ec: *mut VvencEncoder, tracker: &Tracker) {
+    tracker.finish();
+    let ret = unsafe { vvenc_encoder_close(ec) };
+    if ret != VVENC_OK {
+        cold_path();
+        fatal(format_args!("vvenc_encoder_close failed: {ret}"));
+    }
+}
+
+#[cfg(feature = "vvenc")]
+make_enc_vvenc!(enc_vvenc_conv, send_vvenc_conv);
+#[cfg(feature = "vvenc")]
+make_enc_vvenc!(enc_vvenc_conv_rem, send_vvenc_conv_rem);
+#[cfg(feature = "vvenc")]
+make_enc_vvenc!(enc_vvenc_unpack, send_vvenc_unpack);
+#[cfg(feature = "vvenc")]
+make_enc_vvenc!(enc_vvenc_unpack_rem, send_vvenc_unpack_rem);
+#[cfg(feature = "vvenc")]
+make_enc_vvenc!(enc_vvenc_nv12, send_vvenc_nv12);
+#[cfg(feature = "vvenc")]
+make_enc_vvenc!(enc_vvenc_nv12_rem, send_vvenc_nv12_rem);
+
+#[cfg(all(feature = "vvenc", feature = "vship"))]
+make_enc_vvenc_tq!(enc_vvenc_lib, send_vvenc_conv);
+#[cfg(all(feature = "vvenc", feature = "vship"))]
+make_enc_vvenc_tq!(enc_vvenc_lib_rem, send_vvenc_conv_rem);
+#[cfg(all(feature = "vvenc", feature = "vship"))]
+make_enc_vvenc_tq!(enc_vvenc_lib_unpack, send_vvenc_unpack);
+#[cfg(all(feature = "vvenc", feature = "vship"))]
+make_enc_vvenc_tq!(enc_vvenc_lib_unpack_rem, send_vvenc_unpack_rem);
+
+#[cfg(feature = "vvenc")]
+fn enc_vvenc_direct(
+    yuv: &mut Vec<u8>,
+    out: &mut dyn Write,
+    cfg: &EncConfig,
+    ctx: &EncWorkerCtx,
+    _conv_buf: &mut [u8],
+    track: &EncTrack,
+) -> u64 {
+    let &EncTrack {
+        worker_id,
+        track_frames,
+        crf_score,
+    } = track;
+    let mut ec = MaybeUninit::<VvencEncoder>::uninit();
+    let ecp = ec.as_mut_ptr();
+    init_vvenc(cfg, ecp);
+
+    let w = cfg.width as usize;
+    let h = cfg.height as usize;
+    let y_sz = w * h * 2;
+    let uv_sz = (w / 2) * (h / 2) * 2;
+
+    let mut buf = vvenc_img(null_mut(), w, h);
+    let buf_ptr = &raw mut buf;
+    let au = new_au();
+    let tracker = Tracker::new(
+        ctx.prog,
+        worker_id,
+        cfg.chnk_idx,
+        cfg.frames,
+        track_frames,
+        crf_score,
+    );
+    let mut done = 0;
+    let mut sz = 0;
+    let frame_sz = ctx.pipe.frame_sz;
+    let mut src = yuv.as_ptr().cast_mut();
+
+    for i in 0..cfg.frames {
+        unsafe {
+            (*buf_ptr).planes[0].ptr = src.cast();
+            (*buf_ptr).planes[1].ptr = src.add(y_sz).cast();
+            (*buf_ptr).planes[2].ptr = src.add(y_sz + uv_sz).cast();
+            src = src.add(frame_sz);
+            (*buf_ptr).sequence_number = i as u64;
+        }
+        let mut ef = false;
+        encode(ecp, buf_ptr, au, &mut ef);
+
+        sz += drain_vvenc_au(au, out, &tracker, &mut done);
+    }
+    *yuv = Vec::new();
+
+    let mut flush = false;
+    while !flush {
+        encode_drain(ecp, au, &mut flush);
+        sz += drain_vvenc_au(au, out, &tracker, &mut done);
+    }
+
+    drop_au(au);
+    finish_vvenc(ecp, &tracker);
     sz
 }
 

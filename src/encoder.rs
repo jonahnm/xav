@@ -83,6 +83,9 @@ impl Encoder {
             Avm => assume_unreachable(),
             X264 => run_version("x264", "x264", None),
             X265 => run_version("x265", "x265", Some("version ")),
+            #[cfg(feature = "vvenc")]
+            Vvenc => concat!("vvenc v", env!("XAV_V_VVENC")).to_owned(),
+            #[cfg(not(feature = "vvenc"))]
             Vvenc => run_version("vvencFFapp", "vvenc", Some("version ")),
         }
     }
@@ -132,7 +135,10 @@ pub struct EncConfig<'a> {
 pub fn make_enc_cmd(encoder: Encoder, cfg: &EncConfig, zone: Option<&str>) -> Command {
     let mut cmd = match encoder {
         SvtAv1 | Avm => assume_unreachable(),
+        #[cfg(not(feature = "vvenc"))]
         Vvenc => make_vvenc_cmd(cfg),
+        #[cfg(feature = "vvenc")]
+        Vvenc => assume_unreachable(),
         X265 => make_x265_cmd(cfg),
         X264 => make_x264_cmd(cfg),
     };
@@ -142,6 +148,7 @@ pub fn make_enc_cmd(encoder: Encoder, cfg: &EncConfig, zone: Option<&str>) -> Co
     cmd
 }
 
+#[cfg(not(feature = "vvenc"))]
 fn make_vvenc_cmd(cfg: &EncConfig) -> Command {
     let mut cmd = Command::new("vvencFFapp");
 
@@ -520,6 +527,7 @@ fn h26x_mastering(md: &str, x264_format: bool) -> Option<String> {
     }
 }
 
+#[cfg(not(feature = "vvenc"))]
 fn colorize_vvenc(cmd: &mut Command, inf: &VidInf) {
     let tc = inf.transfer_characteristics;
     let cp = inf.color_primaries;

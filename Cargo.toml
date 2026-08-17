@@ -16,6 +16,7 @@ default = [ "vship","cuda","avm" ]
 vship = []
 cuda = []
 avm = []
+vvenc = []
 svt-essential = []
 
 [build-dependencies]

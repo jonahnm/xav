@@ -223,6 +223,7 @@ cleanup_existing() {
                 ["nv-codec-headers"]="install/lib/pkgconfig/ffnvcodec.pc"
                 [Vship]="libvship.a"
                 [avm]="build/libavm_full.a"
+                [vvenc]="install/lib/libvvenc.a"
         )
 
         local successful=() incomplete=()
@@ -231,6 +232,7 @@ cleanup_existing() {
         [[ "${HW}" == cuda ]] && dirs+=(nv-codec-headers) || dirs+=(vulkan)
         ((mode_choice == 1)) && dirs+=(Vship)
         ((ENC_ON[avm])) && dirs+=(avm)
+        ((ENC_ON[vvenc])) && dirs+=(vvenc)
 
         for dir in "${dirs[@]}"; do
                 [[ -d "${BUILD_DIR}/${dir}" ]] || continue
@@ -294,6 +296,9 @@ clone_phase() {
 
         ((mode_choice == 1)) && clone_async "${BUILD_DIR}/Vship" "https://codeberg.org/Line-fr/Vship" "--depth 1"
         ((ENC_ON[avm])) && clone_async "${BUILD_DIR}/avm" "https://github.com/AOMediaCodec/avm" "--depth 1"
+        # the vvenc.rs FFI struct is pinned to this tag; a layout change upstream
+        # is caught at runtime by set_vvenc_base's config cross-check
+        ((ENC_ON[vvenc])) && clone_async "${BUILD_DIR}/vvenc" "https://github.com/fraunhoferhhi/vvenc.git" "--depth 1 --branch v1.14.0"
 
         local pid rc=0
         for pid in "${pids[@]}"; do
@@ -739,6 +744,98 @@ build_avm() {
         }
 }
 
+build_vvenc() {
+        [[ -f "${BUILD_DIR}/vvenc/install/lib/libvvenc.a" ]] && return
+
+        loginf b "Building VVenC (VVC/H.266)"
+
+        local logfile="/tmp/build_vvenc_$.log"
+        local pgo_dir="${BUILD_DIR}/vvenc/pgo"
+        : > "${logfile}"
+
+        cd "${BUILD_DIR}/vvenc"
+
+        local common=(
+                -G Ninja
+                -DCMAKE_BUILD_TYPE=Release
+                -DCMAKE_C_COMPILER="${CC}"
+                -DCMAKE_CXX_COMPILER="${CXX}"
+                -DBUILD_SHARED_LIBS=OFF
+                -DVVENC_ENABLE_WERROR=OFF
+                -DVVENC_ENABLE_LINK_TIME_OPT=OFF
+                -DCMAKE_INSTALL_PREFIX="${BUILD_DIR}/vvenc/install"
+                -DCMAKE_INSTALL_LIBDIR=lib
+        )
+
+        if ((PGO_ENABLED)); then
+                # -flto conflicts with profile instrumentation; strip it for PGO
+                local pgo_cflags="${CFLAGS//-flto=thin/}"
+                local pgo_cxxflags="${CXXFLAGS//-flto=thin/}"
+
+                mkdir -p "${pgo_dir}"
+                loginf b "Downloading PGO training video"
+                curl -L \
+                        "https://media.xiph.org/video/derf/webm/Netflix_FoodMarket2_4096x2160_60fps_10bit_420.webm" \
+                        -o "${pgo_dir}/i.webm" >> "${logfile}" 2>&1
+                ffmpeg -hide_banner -v error -y -nostdin -i "${pgo_dir}/i.webm" \
+                        -frames:v 96 \
+                        -vf "scale=1920:1080:flags=lanczos+accurate_rnd+full_chroma_int:param0=4" \
+                        -pix_fmt yuv420p10le -strict -1 -f rawvideo "${pgo_dir}/i.yuv" \
+                        >> "${logfile}" 2>&1
+                rm -f "${pgo_dir}/i.webm"
+
+                loginf b "VVenC PGO generate"
+                cmake -B build-pgo "${common[@]}" \
+                        -DCMAKE_C_FLAGS="-fprofile-instr-generate ${pgo_cflags}" \
+                        -DCMAKE_CXX_FLAGS="-fprofile-instr-generate ${pgo_cxxflags}" \
+                        -DCMAKE_EXE_LINKER_FLAGS="-fprofile-instr-generate" \
+                        >> "${logfile}" 2>&1
+                ninja -C build-pgo vvencFFapp >> "${logfile}" 2>&1
+
+                export LLVM_PROFILE_FILE="${pgo_dir}/%p.profraw"
+                loginf b "VVenC PGO training encode"
+                "${BUILD_DIR}/vvenc/build-pgo/bin/vvencFFapp" \
+                        -i "${pgo_dir}/i.yuv" -b "${pgo_dir}/out.bin" \
+                        -s 1920x1080 --InputBitDepth 10 \
+                        -f 96 -fr 60 --preset medium -q 32 --Verbosity 0 \
+                        >> "${logfile}" 2>&1
+                unset LLVM_PROFILE_FILE
+
+                loginf b "VVenC PGO merge"
+                llvm-profdata merge --sparse=true "${pgo_dir}"/*.profraw \
+                        -o "${pgo_dir}/default.profdata" >> "${logfile}" 2>&1
+                rm -f "${pgo_dir}/i.yuv" "${pgo_dir}/out.bin"
+
+                loginf b "VVenC PGO use"
+                cmake -B build "${common[@]}" \
+                        -DCMAKE_C_FLAGS="-fprofile-instr-use=${pgo_dir}/default.profdata ${pgo_cflags}" \
+                        -DCMAKE_CXX_FLAGS="-fprofile-instr-use=${pgo_dir}/default.profdata ${pgo_cxxflags}" \
+                        -DCMAKE_EXE_LINKER_FLAGS="-fprofile-instr-use=${pgo_dir}/default.profdata" \
+                        >> "${logfile}" 2>&1
+                ninja -C build install >> "${logfile}" 2>&1
+                touch "${BUILD_DIR}/vvenc/install/pgo"
+        else
+                cmake -B build "${common[@]}" \
+                        -DCMAKE_C_FLAGS="${CFLAGS}" \
+                        -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
+                        -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=lld -flto=thin" \
+                        -DVVENC_LIBRARY_ONLY=ON \
+                        -DVVENC_ENABLE_INSTALL=ON \
+                        >> "${logfile}" 2>&1
+                ninja -C build install >> "${logfile}" 2>&1
+        fi
+
+        [[ -f "${BUILD_DIR}/vvenc/install/lib/libvvenc.a" ]] && {
+                rm -f "${logfile}"
+                loginf g "VVenC built successfully"
+        } || {
+                echo -e "\n${R}Build failed! Output:${N}\n"
+                cat "${logfile}"
+                rm -f "${logfile}"
+                exit 1
+        }
+}
+
 setup_toolchain() {
         export CC="clang"
         export CXX="clang++"
@@ -764,8 +861,8 @@ setup_toolchain() {
         unset LDFLAGS
 }
 
-ENCODER_NAMES=("AVM")
-ENCODER_FEATS=("avm")
+ENCODER_NAMES=("VVENC" "AVM")
+ENCODER_FEATS=("vvenc" "avm")
 declare -A ENC_ON=()
 for i in "${!ENCODER_FEATS[@]}"; do ENC_ON["${ENCODER_FEATS[i]}"]=0; done
 
@@ -780,6 +877,7 @@ main() {
         preset="${1:-}"
         svt_fork="${2:-}"
         encoders="${3:-}"
+        pgo="${4:-}"
 
         case "$preset" in
                 static_tq) mode_choice=1 ;;
@@ -790,6 +888,22 @@ main() {
                         echo "Valid presets:"
                         echo "  static_tq"
                         echo "  static_notq"
+                        exit 1
+                        ;;
+        esac
+
+        PGO_ENABLED=0
+        case "$pgo" in
+                pgo) PGO_ENABLED=1 ;;
+                "")
+                        if [[ -f "${BUILD_DIR}/vvenc/install/pgo" ]]; then
+                                PGO_ENABLED=1
+                        fi
+                        ;;
+                *)
+                        echo -e "Unknown pgo: $pgo"
+                        echo "Valid pgo:"
+                        echo "  pgo"
                         exit 1
                         ;;
         esac
@@ -893,6 +1007,11 @@ main() {
                 PID_AVM="${!}"
         }
 
+        ((ENC_ON[vvenc])) && {
+                build_vvenc &
+                PID_VVENC="${!}"
+        }
+
         build_opus &
         PID_OPUS="${!}"
         build_dav1d &
@@ -920,6 +1039,7 @@ main() {
         wait "${PID_OPUS}" && wait "${PID_FFMPEG}" && wait "${PID_SVTAV1}" || exit 1
         ((mode_choice == 1)) && { wait "${PID_VSHIP}" || exit 1; }
         ((ENC_ON[avm])) && { wait "${PID_AVM}" || exit 1; }
+        ((ENC_ON[vvenc])) && { wait "${PID_VVENC}" || exit 1; }
 
         cd "${XAV_DIR}"
 
