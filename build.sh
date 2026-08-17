@@ -332,11 +332,11 @@ build_dav1d() {
         : > "${logfile}"
 
         cd "${BUILD_DIR}/dav1d"
-        # build dav1d with dav1d's own tuned flags; force PIE so the meson
-        # sanity probe stays runnable on glibc >= 2.39 (non-PIE exes break with
-        # an IFUNC circular dependency in libgcc_s).
-        export CFLAGS="-fPIE"
-        export LDFLAGS="-pie"
+        # build dav1d with dav1d's own tuned flags; link the meson sanity probe
+        # statically -- on glibc >= 2.39 even PIE dynamic executables fail with
+        # an IFUNC circular dependency in libgcc_s.
+        export CFLAGS=""
+        export LDFLAGS="-static"
         meson setup build --default-library=static \
                 --buildtype=release \
                 -Denable_tools=false \
@@ -877,7 +877,10 @@ setup_toolchain() {
 	-fno-use-cxa-atexit -D_FORTIFY_SOURCE=0"
         export CFLAGS="${COMMON_FLAGS}"
         export CXXFLAGS="${COMMON_FLAGS} -stdlib=libstdc++"
-        unset LDFLAGS
+        # static link everywhere: on glibc >= 2.39 dynamically-linked executables
+        # fail at load time with the libgcc_s IFUNC circular dependency, so the
+        # build tools' own test/probe executables must be static to run.
+        export LDFLAGS="-static"
 }
 
 ENCODER_NAMES=("VVENC" "AVM")
@@ -956,7 +959,9 @@ main() {
                 done
         } || select_encoders
 
-        config_file=".cargo/config.toml.static"
+        # fully-static build: only static binaries run on glibc >= 2.39 without
+        # the libgcc_s IFUNC circular-dependency failure
+        config_file=".cargo/config.toml.static_notq"
 
         case "${mode_choice}" in
                 1)
