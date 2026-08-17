@@ -270,11 +270,25 @@ cleanup_existing() {
 clone_async() {
         local target="${1}" url="${2}" extra="${3:-}"
         [[ -d "${target}" ]] && return
+        local name
+        name="$(basename "${target}")"
+        echo -e "${C}  >> ${Y}clone ${P}${name}${N} (${url})"
+
         (
-                logfile="/tmp/clone_$(basename "${target}")_$$.log"
-                git clone ${extra} "${url}" "${target}" > "${logfile}" 2>&1
-                rm -f "${logfile}"
+                local logfile="/tmp/clone_${name}_$$.log"
+                if GIT_TERMINAL_PROMPT=0 timeout 300 \
+                        git clone ${extra} "${url}" "${target}" > "${logfile}" 2>&1; then
+                        rm -f "${logfile}"
+                        echo -e "${G}  ✓ ${P}${name}${N} cloned"
+                else
+                        rm -rf "${target}"
+                        echo -e "${R}  ✗ ${P}${name}${N} clone failed:" >&2
+                        cat "${logfile}" >&2 2>/dev/null
+                        rm -f "${logfile}"
+                        exit 1
+                fi
         ) &
+
         pids+=("${!}")
 }
 
@@ -283,7 +297,7 @@ clone_phase() {
 
         local pids=()
 
-        clone_async "${BUILD_DIR}/opus" "https://gitlab.xiph.org/xiph/opus.git"
+        clone_async "${BUILD_DIR}/opus" "https://github.com/xiph/opus.git"
         clone_async "${BUILD_DIR}/SVT-AV1" "${svt_fork_url}"
         clone_async "${BUILD_DIR}/dav1d" "https://github.com/videolan/dav1d.git"
         clone_async "${BUILD_DIR}/FFmpeg" "https://github.com/FFmpeg/FFmpeg"
@@ -294,7 +308,7 @@ clone_phase() {
                 clone_async "${BUILD_DIR}/vulkan/Vulkan-Loader" "https://github.com/KhronosGroup/Vulkan-Loader.git" "--depth 1"
         }
 
-        ((mode_choice == 1)) && clone_async "${BUILD_DIR}/Vship" "https://codeberg.org/Line-fr/Vship" "--depth 1"
+        ((mode_choice == 1)) && clone_async "${BUILD_DIR}/Vship" "https://github.com/Line-fr/Vship" "--depth 1"
         ((ENC_ON[avm])) && clone_async "${BUILD_DIR}/avm" "https://github.com/AOMediaCodec/avm" "--depth 1"
         # the vvenc.rs FFI struct is pinned to this tag; a layout change upstream
         # is caught at runtime by set_vvenc_base's config cross-check
