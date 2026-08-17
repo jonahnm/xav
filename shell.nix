@@ -14,14 +14,29 @@
 #
 # NOTE: this is a classic nix expression (no flake). Linux x86_64/aarch64 only,
 # matching the Linux-targeted build.sh.
+#
+# IMPORTANT: nixpkgs is PINNED to a single revision (below) rather than using
+# <nixpkgs>/NIX_PATH, because a mixed channel/NIX_PATH resolves to mutually
+# incompatible store paths (e.g. clang, gcc's libgcc_s, and glibc's ld.so from
+# different revisions). That mismatch breaks ALL dynamically-linked binaries on
+# glibc >= 2.39 with:
+#   "IFUNC symbol 'memset' referenced in 'libgcc_s.so.1' is defined in the
+#    executable and creates an unsatisfiable circular dependency."
+# Pinning keeps every toolchain component on one coherent snapshot.
+#
+# To bump nixpkgs, update the commit below, fetch the new tarball sha256, e.g.:
+#   curl -L .../tarball/<commit>.tar.gz | sha256sum
 
-{ pkgs ? import <nixpkgs> { } }:
+{ pkgs ? import (builtins.fetchTarball {
+    url =
+      "https://github.com/NixOS/nixpkgs/archive/e5bdc4a41d4c072fe1e3787eaa0320a384741d44.tar.gz";
+    sha256 = "2b5b1642bcbf2a8dd5d0b17877f3d13914f38ad507725379815c7ec0073f1009";
+  }) { }
+}:
 
 let
-  # use the stable LLVM toolchain: bleeding-edge clang (llvmPackages_latest)
-  # dynamically-linked binaries break on glibc>=2.39 with an IFUNC circular
-  # dependency in libgcc_s ("IFUNC symbol 'memset' ... is defined in the
-  # executable and creates an unsatisfiable circular dependency").
+  # use the stable LLVM toolchain; the bleeding-edge llvmPackages_latest can
+  # break dynamic linking on newer glibc.
   llvm = pkgs.llvmPackages;
 in
 pkgs.mkShell {
