@@ -332,6 +332,10 @@ build_dav1d() {
         : > "${logfile}"
 
         cd "${BUILD_DIR}/dav1d"
+        # meson's compiler probes must produce runnable executables; the project
+        # CFLAGS (-flto=thin, -fno-pie/-fno-pic) break that, so build dav1d with
+        # its own tuned flags instead.
+        unset CFLAGS CXXFLAGS LDFLAGS
         meson setup build --default-library=static \
                 --buildtype=release \
                 -Denable_tools=false \
