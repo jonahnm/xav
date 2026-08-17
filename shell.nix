@@ -24,13 +24,11 @@
 #    executable and creates an unsatisfiable circular dependency."
 # Pinning keeps every toolchain component on one coherent snapshot.
 #
-# To bump nixpkgs, update the commit below, fetch the new tarball sha256, e.g.:
-#   curl -L .../tarball/<commit>.tar.gz | sha256sum
+# To bump nixpkgs, change the rev (full commit) below.
 
-{ pkgs ? import (builtins.fetchTarball {
-    url =
-      "https://github.com/NixOS/nixpkgs/archive/e5bdc4a41d4c072fe1e3787eaa0320a384741d44.tar.gz";
-    sha256 = "2b5b1642bcbf2a8dd5d0b17877f3d13914f38ad507725379815c7ec0073f1009";
+{ pkgs ? import (builtins.fetchGit {
+    url = "https://github.com/NixOS/nixpkgs";
+    rev = "e5bdc4a41d4c072fe1e3787eaa0320a384741d44";
   }) { }
 }:
 
